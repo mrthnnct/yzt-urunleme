@@ -5,8 +5,14 @@ import sys
 import torch
 import math
 import mediapipe as mp
+import face_recognition
+import pickle
+from datetime import datetime
 
 ## mediapipe is now implemented correctly
+
+
+## TODO last committeki 7 gazilyon yeni satırı pull reqde açıkla düzgünce yoksa mal gibi durur ty
 
 # Set environment variable to prefer NVIDIA GPU
 os.environ["OPENCV_DNN_BACKEND_CUDA"] = "1"
@@ -241,8 +247,142 @@ def process_face_upright(face_image, detected_angle, display_width, display_heig
     # Fallback
     return np.zeros((display_height, display_width, 3), dtype=np.uint8)
 
+class FaceRecognizer:
+    def __init__(self, known_faces_path='known_faces.pkl'):
+        self.known_faces_path = known_faces_path
+        self.known_face_encodings = []
+        self.known_face_names = []
+        self.load_known_faces()
+        
+    def load_known_faces(self):
+        """Load known faces from pickle file if it exists"""
+        try:
+            if os.path.exists(self.known_faces_path):
+                with open(self.known_faces_path, 'rb') as f:
+                    data = pickle.load(f)
+                    self.known_face_encodings = data.get('encodings', [])
+                    self.known_face_names = data.get('names', [])
+                print(f"Loaded {len(self.known_face_names)} known faces")
+            else:
+                print("No known faces file found. Starting with empty database.")
+        except Exception as e:
+            print(f"Error loading known faces: {e}")
+            
+    def save_known_faces(self):
+        """Save known faces to pickle file"""
+        try:
+            with open(self.known_faces_path, 'wb') as f:
+                data = {
+                    'encodings': self.known_face_encodings,
+                    'names': self.known_face_names,
+                    'timestamp': datetime.now().isoformat()
+                }
+                pickle.dump(data, f)
+            print(f"Saved {len(self.known_face_names)} known faces")
+        except Exception as e:
+            print(f"Error saving known faces: {e}")
+            
+    def add_face(self, face_image, name):
+        """Add a new face to the database"""
+        try:
+            # Convert BGR to RGB (face_recognition uses RGB)
+            rgb_image = cv2.cvtColor(face_image, cv2.COLOR_BGR2RGB)
+            
+            # Find face locations and encodings
+            face_locations = face_recognition.face_locations(rgb_image, model="hog")
+            
+            if not face_locations:
+                print("No face found in the image")
+                return False
+                
+            # Get the encoding for the first face found
+            face_encoding = face_recognition.face_encodings(rgb_image, face_locations)[0]
+            
+            # Check if this face is already known
+            if self.known_face_encodings:
+                matches = face_recognition.compare_faces(self.known_face_encodings, face_encoding)
+                if True in matches:
+                    # Face already exists
+                    match_index = matches.index(True)
+                    print(f"Face already exists as {self.known_face_names[match_index]}")
+                    return False
+            
+            # Add the new face
+            self.known_face_encodings.append(face_encoding)
+            self.known_face_names.append(name)
+            
+            # Save the updated faces
+            self.save_known_faces()
+            return True
+        except Exception as e:
+            print(f"Error adding face: {e}")
+            return False
+            
+    def recognize_face(self, face_image):
+        """Recognize a face from the database"""
+        if not self.known_face_encodings:
+            return "Unknown"
+            
+        try:
+            # Convert BGR to RGB
+            rgb_image = cv2.cvtColor(face_image, cv2.COLOR_BGR2RGB)
+            
+            # Find face locations and encodings
+            face_locations = face_recognition.face_locations(rgb_image, model="hog")
+            
+            if not face_locations:
+                return "No face detected"
+                
+            # Get encoding for the first face
+            face_encoding = face_recognition.face_encodings(rgb_image, face_locations)[0]
+            
+            # Compare with known faces
+            matches = face_recognition.compare_faces(self.known_face_encodings, face_encoding, tolerance=0.6)
+            
+            # Calculate face distances for better matching
+            face_distances = face_recognition.face_distance(self.known_face_encodings, face_encoding)
+            
+            if len(face_distances) > 0:
+                best_match_index = np.argmin(face_distances)
+                confidence = 1 - face_distances[best_match_index]
+            
+            # Always show the best match, but with confidence level indicated
+                if matches[best_match_index] and confidence > 0.5:
+                    return f"{self.known_face_names[best_match_index]} ({confidence:.2f})"
+                elif confidence > 0.4:  # Lower threshold for showing a name
+                    return f"{self.known_face_names[best_match_index]} (Low: {confidence:.2f})"
+                else:
+                    # If we're really unsure, still show the closest match with warning
+                    return f"Maybe {self.known_face_names[best_match_index]}? ({confidence:.2f})"
+        
+            return "Unknown"
+        except Exception as e:
+            print(f"Error recognizing face: {e}")
+            return "Error"
+    
+    def get_known_face_count(self):
+        """Return number of known faces"""
+        return len(self.known_face_names)
+        
+    def get_known_face_names(self):
+        """Return list of known face names"""
+        return self.known_face_names
+        
+    def remove_face(self, name):
+        """Remove a face from the database by name"""
+        if name in self.known_face_names:
+            index = self.known_face_names.index(name)
+            self.known_face_names.pop(index)
+            self.known_face_encodings.pop(index)
+            self.save_known_faces()
+            return True
+        return False
+
 def faceDetection():
     cuda_available = check_cuda()
+    
+    # Initialize face recognizer
+    face_recognizer = FaceRecognizer()
     
     # Use DNN-based face detector
     model_file = "res10_300x300_ssd_iter_140000.caffemodel"
@@ -256,7 +396,12 @@ def faceDetection():
         os.rename("res10_300x300_ssd_iter_140000_fp16.caffemodel", model_file)
     
     # Load the DNN face detector using OpenCV
-    net = cv2.dnn.readNet(model_file, config_file)
+    try:
+        net = cv2.dnn.readNet(model_file, config_file)
+        print(f"Successfully loaded face detection model from {model_file} and {config_file}")
+    except Exception as e:
+        print(f"Error loading face detection model: {e}")
+        return
     
     # Use CUDA if available
     if cuda_available:
@@ -267,7 +412,18 @@ def faceDetection():
             net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
             net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
     
-    cap = cv2.VideoCapture(0)
+    # Open webcam - try multiple indices if first attempt fails
+    cap = None
+    for i in range(3):  # Try webcam indices 0, 1, 2
+        print(f"Trying to open webcam at index {i}")
+        cap = cv2.VideoCapture(i)
+        if cap.isOpened():
+            print(f"Successfully opened webcam at index {i}")
+            break
+    
+    if cap is None or not cap.isOpened():
+        print("Failed to open webcam. Make sure it's connected and not used by another application.")
+        return
     
     # Create named windows
     cv2.namedWindow('Face Detection (DNN)', cv2.WINDOW_NORMAL)
@@ -278,6 +434,14 @@ def faceDetection():
     offset_x = 0  # Horizontal position offset in pixels
     offset_y = 0  # Vertical position offset in pixels
     auto_rotate = True  # Toggle for auto-rotation feature
+    
+    # Recognition mode and state variables
+    recognition_enabled = True
+    adding_new_face = False
+    deleting_face = False
+    new_face_name = ""
+    delete_face_input = ""
+    face_recognition_cooldown = 0
     
     # Fixed display dimensions for face window
     display_width = 300
@@ -290,35 +454,67 @@ def faceDetection():
     print("- Press arrow keys or WASD to move face rectangle")
     print("- Press 'o' to toggle auto-rotation")
     print("- Press 'r' to reset position and size")
+    print("- Press 'f' to toggle face recognition")
+    print("- Press 'n' to add a new face (then type name and press Enter)")
+    print("- Press 'x' to delete a face (then type name or number and press Enter)")
+    print("- Press 'l' to list all known faces")
     print("- Press 'q' to quit")
+    
     
     # Store the last detected rotation angle for smoothing
     last_rotation_angle = 0
+    current_face_name = "Unknown"
+    
+    frame_count = 0
     
     while True:
         # Read frame
         ret, frame = cap.read()
         
         if not ret:
-            print("Failed to capture frame")
+            print(f"Failed to capture frame ({frame_count} frames captured so far)")
+            if frame_count == 0:
+                # Try to fix webcam if no frames were captured
+                print("Trying to reinitialize webcam...")
+                cap.release()
+                cap = cv2.VideoCapture(0)
+                if not cap.isOpened():
+                    print("Could not reinitialize webcam. Exiting.")
+                    break
+                continue
             break
-            
+        
+        frame_count += 1
+        if frame_count == 1:
+            print(f"Successfully captured first frame: {frame.shape}")
+        
         # Create a clean copy of the frame for face extraction before any drawing
         clean_frame = frame.copy()
         
         # Prepare frame for face detection
-        blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300), [104, 117, 123], False, False)
+        try:
+            blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300), [104, 117, 123], False, False)
+        except Exception as e:
+            print(f"Error creating blob: {e}")
+            continue
         
         # Use PyTorch if available
         if torch.cuda.is_available():
-            # Convert blob to PyTorch tensor and move to GPU
-            tensor = torch.from_numpy(blob).cuda()
-            
-            # Convert back to numpy for OpenCV
-            blob = tensor.cpu().numpy()
+            try:
+                # Convert blob to PyTorch tensor and move to GPU
+                tensor = torch.from_numpy(blob).cuda()
+                
+                # Convert back to numpy for OpenCV
+                blob = tensor.cpu().numpy()
+            except Exception as e:
+                print(f"Error using PyTorch CUDA: {e}")
         
-        net.setInput(blob)
-        detections = net.forward()
+        try:
+            net.setInput(blob)
+            detections = net.forward()
+        except Exception as e:
+            print(f"Error in DNN forward pass: {e}")
+            continue
         
         # Process detections
         h, w = frame.shape[:2]
@@ -385,98 +581,239 @@ def faceDetection():
             cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
             
             # Extract face from the CLEAN frame using adjusted coordinates
-            face_crop = clean_frame[y1:y2, x1:x2].copy()
+            if y1 < y2 and x1 < x2:  # Ensure valid crop region
+                face_crop = clean_frame[y1:y2, x1:x2].copy()
+                
+                # Perform face recognition if enabled
+                if recognition_enabled and face_crop.size > 0 and face_recognition_cooldown <= 0:
+                    current_face_name = face_recognizer.recognize_face(face_crop)
+                    face_recognition_cooldown = 15  # Reset cooldown (frames)
+                elif face_recognition_cooldown > 0:
+                    face_recognition_cooldown -= 1
+                
+                rotation_angle = 0
+                if auto_rotate and face_crop.size > 0:
+                    # Detect face orientation
+                    current_angle = detect_face_orientation(face_crop)
+                    
+                    # Apply temporal smoothing to reduce jitter
+                    rotation_angle = 0.7 * last_rotation_angle + 0.3 * current_angle
+                    last_rotation_angle = rotation_angle
+                    
+                    # Show the rotation angle on the main frame
+                    cv2.putText(frame, f"Rotation: {rotation_angle:.1f}°", 
+                               (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    
+                    # Process face to make it upright and fill the frame
+                    face_display = process_face_upright(
+                        face_crop, 
+                        rotation_angle,  # Pass the detected angle
+                        display_width, 
+                        display_height
+                    )
+                else:
+                    # No auto-rotation - just resize to fill
+                    face_display = process_face_upright(
+                        face_crop, 
+                        0,  # No rotation
+                        display_width, 
+                        display_height
+                    )
+                
+                # Display the recognized name on both frames if recognition is enabled
+                if recognition_enabled:
+                    cv2.putText(frame, f"Person: {current_face_name}", 
+                              (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                
+                    cv2.putText(face_display, current_face_name, 
+                              (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        
+                # Show if we're in "add new face" mode
+                if adding_new_face:
+                    cv2.putText(frame, f"Adding new face: {new_face_name}_", 
+                              (10, h-20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                
+                elif deleting_face:
+                    cv2.putText(frame, f"Delete face: {delete_face_input}_", 
+                      (10, h-20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
             
-            rotation_angle = 0
-            if auto_rotate and face_crop.size > 0:
-                # Detect face orientation
-                current_angle = detect_face_orientation(face_crop)
-                
-                # Apply temporal smoothing to reduce jitter
-                rotation_angle = 0.7 * last_rotation_angle + 0.3 * current_angle
-                last_rotation_angle = rotation_angle
-                
-                # Show the rotation angle on the main frame
-                cv2.putText(frame, f"Rotation: {rotation_angle:.1f}°", 
-                           (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-                
-                # Process face to make it upright and fill the frame
-                face_display = process_face_upright(
-                    face_crop, 
-                    rotation_angle,  # Pass the detected angle
-                    display_width, 
-                    display_height
-                )
+                    
             else:
-                # No auto-rotation - just resize to fill
-                face_display = process_face_upright(
-                    face_crop, 
-                    0,  # No rotation
-                    display_width, 
-                    display_height
-                )
+                print(f"Invalid crop region: ({x1}, {y1}) to ({x2}, {y2})")
+                
         else:
             # No face detected
             face_display = np.zeros((display_height, display_width, 3), dtype=np.uint8)
             cv2.putText(face_display, "No face detected", (30, 150), 
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-        
+                    
         # Show the current settings on the main frame
         status_text = f"Size: {face_margin_percent}% | X: {offset_x}px | Y: {offset_y}px | Rotation: {'AUTO' if auto_rotate else 'OFF'}"
         cv2.putText(frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         
-        # Show frames
-        cv2.imshow('Face Detection (DNN)', frame)
-        cv2.imshow('Detected Face', face_display)
+        # Show frames - Make sure they're not empty
+        if frame.size > 0:
+            cv2.imshow('Face Detection (DNN)', frame)
+        if face_display.size > 0:
+            cv2.imshow('Detected Face', face_display)
         
-        # Check for keyboard input
+        # Check for keyboard input with lower timeout for more responsive UI
         key = cv2.waitKey(1) & 0xFF
         
-        # Process key presses
-        if key == ord('q'):
-            break
-        
-        # Size control keys
-        elif key == ord('+') or key == ord('='):
-            face_margin_percent += 5
-            print(f"Increased face margin to {face_margin_percent}%")
-        elif key == ord('-') or key == ord('_'):
-            face_margin_percent -= 5
-            print(f"Decreased face margin to {face_margin_percent}%")
-        
-        # Position control keys - multiple options for cross-platform compatibility
-        # Left: Left arrow or 'a'
-        elif key == ord('a') or key == 81 or key == 2 or key == 65361:
-            offset_x -= 5
-            print(f"Moved left: offset_x = {offset_x}")
-        # Right: Right arrow or 'd' 
-        elif key == ord('d') or key == 83 or key == 3 or key == 65363:
-            offset_x += 5
-            print(f"Moved right: offset_x = {offset_x}")
-        # Up: Up arrow or 'w'
-        elif key == ord('w') or key == 82 or key == 0 or key == 65362:
-            offset_y -= 5
-            print(f"Moved up: offset_y = {offset_y}")
-        # Down: Down arrow or 's'
-        elif key == ord('s') or key == 84 or key == 1 or key == 65364:
-            offset_y += 5
-            print(f"Moved down: offset_y = {offset_y}")
-        
-        # Toggle auto-rotation
-        elif key == ord('o'):
-            auto_rotate = not auto_rotate
-            print(f"Auto-rotation: {'ON' if auto_rotate else 'OFF'}")
-        
-        # Reset position
-        elif key == ord('r'):
-            offset_x = 0
-            offset_y = 0
-            face_margin_percent = 0
-            print("Reset face position and size")
-    
+        # Process key presses - prioritize name input mode
+        if adding_new_face:
+            # When in name input mode, only handle name input related keys
+            # Handle backspace
+            if key == 8 or key == 127:  # Backspace
+                new_face_name = new_face_name[:-1]
+                print(f"Entering name: {new_face_name}_")
+            # Handle Enter to confirm
+            elif key == 13 or key == 10:  # Enter
+                if new_face_name:
+                    if face_recognizer.add_face(face_crop, new_face_name):
+                        print(f"Added new face: {new_face_name}")
+                    else:
+                        print("Failed to add face.")
+                    adding_new_face = False
+                    new_face_name = ""
+                else:
+                    print("Name cannot be empty.")
+            # Handle Escape to cancel name input
+            elif key == 27:  # Escape key
+                print("Cancelled adding new face")
+                adding_new_face = False
+                new_face_name = ""
+            # Handle printable characters
+            elif 32 <= key <= 126:  # Printable ASCII
+                new_face_name += chr(key)
+                print(f"Entering name: {new_face_name}_")
+            # Ignore all other keys when in name input mode
+        elif deleting_face:
+            if key == 8 or key == 127: # backspace
+                delete_face_input = delete_face_input[:-1]
+                print(f"Enter a name/number to delete: {delete_face_input}_")
+                
+            elif key == 13 or key == 10: # enter
+                if delete_face_input:
+                    try:
+                        idx = int(delete_face_input) - 1
+                        known_faces = face_recognizer.get_known_face_names()
+                        if 0 <= idx < len(known_faces):
+                            name_to_delete = known_faces[idx]
+                            if face_recognizer.remove_face(name_to_delete):
+                                print(f"Deleted face: {name_to_delete}")
+                            else:
+                                print(f"Failed to delete face: {name_to_delete}")
+                        else:
+                            print(f"Invalid index.")
+                    except ValueError:
+                        if face_recognizer.remove_face(delete_face_input):
+                            print(f"Deleted face: {delete_face_input}")
+                        else:
+                            print(f"Face not found: {delete_face_input}")
+                    
+                    deleting_face = False
+                    delete_face_input = ""
+                    
+                    known_faces = face_recognizer.get_known_face_names()
+                    print(f"Known faces are now ({len(known_faces)})")
+                    for i, name in enumerate(known_faces):
+                        print(f"{i+1}. {name}")
+                        
+                else:
+                    print("Name or number cannot be empty.")
+                    
+            elif key == 27: # esc
+                print("Cancelled deleting face")
+                deleting_face = False
+                delete_face_input = ""
+            elif 32 <= key <= 126:
+                delete_face_input += chr(key)
+                print(f"Enter a name or number to delete {delete_face_input}_")
+        else:
+            # Only process these keys when NOT in name input mode
+            if key == ord('q'):
+                break
+            
+            # Size control keys
+            elif key == ord('+') or key == ord('='):
+                face_margin_percent += 5
+                print(f"Increased face margin to {face_margin_percent}%")
+            elif key == ord('-') or key == ord('_'):
+                face_margin_percent -= 5
+                print(f"Decreased face margin to {face_margin_percent}%")
+            
+            # Position control keys - multiple options for cross-platform compatibility
+            # Left: Left arrow or 'a'
+            elif key == ord('a') or key == 81 or key == 2 or key == 65361:
+                offset_x -= 5
+                print(f"Moved left: offset_x = {offset_x}")
+            # Right: Right arrow or 'd' 
+            elif key == ord('d') or key == 83 or key == 3 or key == 65363:
+                offset_x += 5
+                print(f"Moved right: offset_x = {offset_x}")
+            # Up: Up arrow or 'w'
+            elif key == ord('w') or key == 82 or key == 0 or key == 65362:
+                offset_y -= 5
+                print(f"Moved up: offset_y = {offset_y}")
+            # Down: Down arrow or 's'
+            elif key == ord('s') or key == 84 or key == 1 or key == 65364:
+                offset_y += 5
+                print(f"Moved down: offset_y = {offset_y}")
+            
+            # Toggle auto-rotation
+            elif key == ord('o'):
+                auto_rotate = not auto_rotate
+                print(f"Auto-rotation: {'ON' if auto_rotate else 'OFF'}")
+            
+            # Reset position
+            elif key == ord('r'):
+                offset_x = 0
+                offset_y = 0
+                face_margin_percent = 0
+                print("Reset face position and size")
+                
+            # Toggle face recognition
+            elif key == ord('f'):
+                recognition_enabled = not recognition_enabled
+                print(f"Face recognition: {'ON' if recognition_enabled else 'OFF'}")
+                
+            # Add new face mode
+            elif key == ord('n'):
+                if best_face_coords and frame_count > 0:
+                    adding_new_face = True
+                    new_face_name = ""
+                    print("Adding new face. Type name and press Enter:")
+                    print("(Press ESC to cancel)")
+                else:
+                    print("No face detected to add.")
+            
+            # List known faces
+            elif key == ord('l'):
+                known_faces = face_recognizer.get_known_face_names()
+                print(f"Known faces ({len(known_faces)}):")
+                for i, name in enumerate(known_faces):
+                    print(f"{i+1}. {name}")
+            
+            elif key == ord('x'):
+                known_faces = face_recognizer.get_known_face_names()
+                if known_faces:
+                    deleting_face = True
+                    delete_face_input = ""
+                    print("Deleting face. Type name or number of face and press Enter:")
+                    print("Press Esc to cancel")
+                    
+                    print(f"Known faces ({len(known_faces)}):")
+                    
+                    for i, name in enumerate(known_faces):
+                        print(f"{i+1}. {name}")
+                else:
+                    print("No faces in database to delete.")
+                
     # Clean up
     cap.release()
     face_mesh.close()
+    cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     faceDetection()
